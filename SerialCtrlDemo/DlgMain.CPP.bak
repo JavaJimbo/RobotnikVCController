@@ -1,0 +1,1739 @@
+/*  Project: ROSCID LOGGER PLUS
+* 
+*   Adpated from Roscid Modbus Logger, which was adapted from Roscid Modbus Calibrator.
+*	DlgMain.cpp : implementation file
+*
+*	Baudrate bug fix: set to default 19200 in SerialCtrl::OpenPort()
+*	void CSerialCtrlDemoDlg::OnButtonClickedTest() add '\r'
+*
+*	12-21-18: Woburn: Removed all Run thread code and CSerialIO class.
+*	12-21-18: Sending and Receiving works great.
+*	12-23-18: Ann Arbor: WAM Modbus missing DLL, so I removed it entirely.
+*	12-24-18: Ann Arbor:
+*	12-28-18  Woburn: Up to date version with tested Modbus communication
+*				Two way Modbus communication working.
+*  12-29-18: Warwick:
+*  01-01-19: Warwick: Got Modbus read/write working in ModbusMaster object.
+*  01-02-19: Warwick: Modified OpenPort() to accept baudrate input arg. Began coding LoadConfig() and created ModbusPort class.
+*  01-03-19: Woburn: Got ReadModbusInputRegister() reading RH from four units.
+*  01-07-19: Warwick: Completed the serial port setup routine. 
+*				Modbus ports are checked, opened, and saved along with sensor IDs.
+*  01-07-19: Woburn: added manual save, debugged, added datalogging output to file.
+*				File Save As tested, File Open should work but hasn't been tested yet.
+*  01-08-19: Woburn: Added fixed data logging interval of one minute,
+*				first log saved after reset and all sensors read from once.
+*				Modified OpenModbusSerialPorts() to work with two digit com ports.
+*  01-09-19: Woburn: first release version (V1.0) sent to customer,
+*				in conjunction with release of firmware Nasa Sensor Modbus V1.0
+*  01-09-19: Boxborough: 
+*  01-09-19: Woburn: Fixed bug writing to log file, so all sensors get logged.
+*  02-03-19: Warwick: 
+*  02-05-19: Woburn: Added CalibrateSetpoint() function - works for slave ID #0
+*                  for calibrating multiple sensors simultaneously.
+*  02-09-19: Warwick: CalibrateAndCheck() 
+*  02-10-19: Warwick: Completed GetTable() and it works great with four sensors.
+*  02-11-19: Warwick: renamed Roscid Modbus Calibrator
+*  02-13-19: Warwick: fixed data logging bug.
+*  02-13-19  Warwick: Added "band-aid" to clamp RH reading at 200% - divides by 10 if reading is greater than that value.
+*  02-26-19  Boxborough: V2.X sent to Craig at Roscid without testing.
+*				Added delays to serial read and write; Added ResetFileBuffers() to flush serial read buffer; 
+*  02-27-19  Woburn: Version 2.4 GetTable() prints SlaveID in first column. 
+*				Added this statement to SendReceiveModbus(): if (InModbusPacket[0] != OutModbusPacket[0]) return SENSOR_ERROR;
+*  02-28-19 Warwick: Version 2.5: Modified GetTable() to indicate when sensors aren't communicating.
+*  05-10-19 Woburn: Version 2.6: Fixed bug: calibrate command only sent to one COM port.
+*  MAX_NUMBER_OF_MODBUS_PORTS = 16
+*
+*  05-12-19 Warwick: Fixed bugs so temperature is being properly read in Celsius and Fahrenheit.
+*  05-13-19 Warwick: Debugged writes & reads for offset and gain.
+*  05-14-19 Warwick: Adapted from Roscid Modbus Calibrator 
+*  05-15-19 Warwick: Completed adjustable time interval for data logging. Log interval is variable from one second to 24 hours.
+*					 Customer can log RH and temperature. Calibration controls are invisible and disabled.
+*					 Version 3.0 executable for customer release placed on Egnyte.
+*  05-18-19 warwick: began setting up calibration functions on IDD_DIALOG1. Compiled but didn't test.
+*  05-19-19 Warwick: Debugged calibration functions. Changed name to Roscid Logger Plus.
+*					 Created and debugged GetModbusID() and SetModbusID()
+*  05-20-19 Warwick: RELEASE Roscid Logger Plus V3.2 Got Set Modbus ID Version Number features up and running.
+*  05-29-19 Woburn:  Added code to record and display communication errors.
+*					 RELEASED version 3.3 of Roscid Logger and Roscid Logger Calibrator on Egnyte.
+*  05-31-19 Charlton:Added m_TotalSetpoints, m_SetpointIndex, m_SetpointRH to SystemData and save to Setup.INI
+*					 RELEASED version 3.4 of Roscid Logger Calibrator.
+*  06-04-19 Warwick: Fixed 24 hour rollover bug. RELEASED version V3.5
+*  06-17-19 Warwick: RELEASED VERSION V3.6Fixed bug in PrintFileHeader() - was repeating the sensor # for port #0 on the header.
+*					 Replaced i,j,k, with portIndex. Customer version: suppress COM errors. Clamp RH readings to MAX_PRECENT_RH = 101.0
+*					 Created m_totalSensorsFound
+*/
+#include <windows.h>
+#include "stdafx.h"
+#include "SerialCtrlDemo.h"
+#include "SerialCtrlDemoDlg.h"
+#include "SerialCtrl.h"
+#include "ModbusMaster.h"
+#include <stdlib.h>
+#include <stdio.h>
+
+#define MAX_PRECENT_RH 101.0
+#define CUSTOMER_VERSION true
+
+int stepNumber = 0;
+CString strNonModbusName, strModbusName;
+bool RunEnable = false, EnableTemperatureLogging = true, UseTempCelsius = true;
+
+LOGFONT logfont;
+CFont BigFont, MediumFont;
+
+BYTE SensorList[MAX_SENSORS];
+#define LAST_INSTRUCTION_STEP 6
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
+int LogDisplayCounter;
+CString TempPath = "C:\\Temp\\";
+CString ConfigFilename = ".\\Config.txt";
+CString CalTableFileName = TempPath + "CalTable.csv";
+CString strInstructText = "";
+CSerialCtrlDemoDlg *ptrDialog;
+// CString arrSerialPorts[255];
+
+#ifdef _DEBUG
+#define new DEBUG_NEW
+#endif
+
+#define	IDT_TIMER_0	WM_USER + 200
+#define TIMER_INTERVAL 100  // Main process loop timer interval in milliseconds
+// Actually, it's more like milliseconds x 2
+// So an interval value of 100 corresponds to about 200 milliseconds,
+// or two tenths of a second.
+
+int seconds = 0;
+bool RunDataLogFlag = false, GetCalTableFlag = false, RunAutoSetup = false, ResetFlag = false, GetVersionNumberFlag = false;
+
+CString strModbusRx = "";
+
+// CAboutDlg dialog used for App About
+
+class CAboutDlg : public CDialog
+{
+public:
+	CAboutDlg();
+
+	// Dialog Data
+	enum { IDD = IDD_ABOUTBOX };
+
+protected:
+	virtual void DoDataExchange(CDataExchange* pDX);    // DDX/DDV support
+
+														// Implementation
+protected:
+	DECLARE_MESSAGE_MAP()
+};
+
+CAboutDlg::CAboutDlg() : CDialog(CAboutDlg::IDD)
+{
+}
+
+void CAboutDlg::DoDataExchange(CDataExchange* pDX)
+{
+	CDialog::DoDataExchange(pDX);
+}
+
+BEGIN_MESSAGE_MAP(CAboutDlg, CDialog)
+END_MESSAGE_MAP()
+
+CSerialCtrlDemoDlg::CSerialCtrlDemoDlg(CWnd* pParent /*=NULL*/) : CDialog(CSerialCtrlDemoDlg::IDD, pParent), bPortOpened(FALSE)
+{
+	int i, portIndex;
+	m_hIcon = AfxGetApp()->LoadIcon(IDR_MAINFRAME);
+	m_LogFileName = "LogFile.csv";
+	m_TotalModbusPorts = 0;	
+	
+	for (portIndex = 0; portIndex < MAX_NUMBER_OF_MODBUS_PORTS; portIndex++)
+	{
+		arrModPorts[portIndex].NumberOfSensors = 0;
+		arrModPorts[portIndex].strSensors = "";
+		arrModPorts[portIndex].ComPortName = "";
+		arrModPorts[portIndex].pMod = new ModbusMaster;
+		for (i = 0; i < MAX_SENSORS; i++)
+		{
+			arrModPorts[portIndex].SensorID[i] = 0;
+			arrModPorts[portIndex].SensorRH[i] = 0;
+			arrModPorts[portIndex].SensorTemperatureCelsius[i] = 0;
+			arrModPorts[portIndex].SensorTemperatureFahrenheit[i] = 0;
+		}
+	}
+}
+
+
+CSerialCtrlDemoDlg::~CSerialCtrlDemoDlg()
+{
+	int portIndex;
+
+	m_LogFile.close();
+	for (portIndex = 0; portIndex < m_TotalModbusPorts; portIndex++) arrModPorts[portIndex].pMod->ClosePort();
+	for (portIndex = 0; portIndex < MAX_NUMBER_OF_MODBUS_PORTS; portIndex++) delete arrModPorts[portIndex].pMod;
+	m_DlgSetup.KillPointerToSD();
+	// StopTimer(TIMER_INTERVAL);
+}
+
+
+void CSerialCtrlDemoDlg::DoDataExchange(CDataExchange* pDX)
+{
+	CDialog::DoDataExchange(pDX);	
+	DDX_Control(pDX, IDC_LIST_LOG, m_ListLog);	
+	DDX_Control(pDX, IDC_EDIT_STATUS, m_EditStatus);
+	DDX_Control(pDX, IDC_EDIT_COM_1, m_EditCom1);
+	DDX_Control(pDX, IDC_EDIT_COM_2, m_EditCom2);
+	DDX_Control(pDX, IDC_EDIT_PORT_1, m_EditPort1);
+	DDX_Control(pDX, IDC_EDIT_PORT_2, m_EditPort2);
+	DDX_Control(pDX, IDC_EDIT_INSTRUCT, m_EditInstruct);
+	
+	DDX_Control(pDX, IDC_BUTTON_START, m_btnStart);
+	
+	DDX_Control(pDX, IDC_BUTTON_PREVIOUS, m_btnPrevious);
+	DDX_Control(pDX, IDC_BUTTON_QUIT, m_btnQuit);
+	DDX_Control(pDX, IDC_BUTTON_YES, m_btnYes);
+	DDX_Control(pDX, IDC_BUTTON_NO, m_btnNo);
+	DDX_Control(pDX, IDC_BUTTON_NEXT, m_btnNext);
+
+	DDX_Control(pDX, IDC_BUTTON_SAVE, m_btnSave);
+	DDX_Control(pDX, IDC_BUTTON_CANCEL, m_btnCancel);
+	DDX_Control(pDX, IDC_BUTTON_RUN, m_btnRun);
+	DDX_Control(pDX, IDC_BUTTON_HALT, m_btnHalt);
+	
+	DDX_Control(pDX, IDC_CHECKBOX_CELSIUS, m_CheckBoxCelsius);
+	DDX_Control(pDX, IDC_CHECKBOX_FAHRENHEIT, m_CheckBoxFahrenheit);
+	DDX_Control(pDX, IDC_CHECKBOX_NO_TEMP, m_CheckBoxNoTemperature);
+	
+	DDX_Control(pDX, IDC_EDIT_LOG_INTERVAL_SECONDS, m_EditLogIntervalSeconds);
+	DDX_Control(pDX, IDC_EDIT_LOG_INTERVAL_MINUTES, m_EditLogIntervalMinutes);
+	DDX_Control(pDX, IDC_EDIT_LOG_INTERVAL_HOURS, m_EditLogIntervalHours);
+}
+
+
+BEGIN_MESSAGE_MAP(CSerialCtrlDemoDlg, CDialog)
+	ON_WM_SYSCOMMAND()
+	ON_WM_PAINT()
+	ON_WM_QUERYDRAGICON()
+	ON_WM_TIMER()
+	//}}AFX_MSG_MAP
+	ON_BN_CLICKED(IDC_BUTTON_RUN, &CSerialCtrlDemoDlg::OnBnClickedButtonRun)
+	ON_BN_CLICKED(IDC_BUTTON_HALT, &CSerialCtrlDemoDlg::OnBnClickedHalt)
+
+	ON_BN_CLICKED(IDC_BUTTON_START, &CSerialCtrlDemoDlg::OnBnClickedButtonStart)	
+
+	ON_BN_CLICKED(IDC_CHECKBOX_CELSIUS, &CSerialCtrlDemoDlg::OnBnClickedCheckboxCelsius)
+	ON_BN_CLICKED(IDC_CHECKBOX_FAHRENHEIT, &CSerialCtrlDemoDlg::OnBnClickedCheckboxFahrenheit)
+	ON_BN_CLICKED(IDC_CHECKBOX_NO_TEMP, &CSerialCtrlDemoDlg::OnBnClickedCheckboxNoTemp)
+	
+	ON_BN_CLICKED(IDC_BUTTON_PREVIOUS, &CSerialCtrlDemoDlg::OnBnClickedButtonPrevious)
+	ON_BN_CLICKED(IDC_BUTTON_QUIT, &CSerialCtrlDemoDlg::OnBnClickedButtonQuit)
+	ON_BN_CLICKED(IDC_BUTTON_YES, &CSerialCtrlDemoDlg::OnBnClickedButtonYes)
+	ON_BN_CLICKED(IDC_BUTTON_NO, &CSerialCtrlDemoDlg::OnBnClickedButtonNo)
+	ON_BN_CLICKED(IDC_BUTTON_NEXT, &CSerialCtrlDemoDlg::OnBnClickedButtonNext)
+
+	ON_COMMAND(ID_HELP_ABOUT, &CSerialCtrlDemoDlg::OnBnClickedButtonAbout)		
+	ON_COMMAND(ID_MENU_FILE_OPEN, &CSerialCtrlDemoDlg::OnMenuClickedOpen)
+	ON_COMMAND(ID_FILE_SAVEAS, &CSerialCtrlDemoDlg::OnMenuClickedSaveAs)
+	
+	ON_COMMAND(ID_COM_PORT_AUTO_SETUP, &CSerialCtrlDemoDlg::OnBnClickedComPortAutoSetup)
+	// ON_COMMAND(ID_MENU_CALIBRATE, &CSerialCtrlDemoDlg::OnMenuClickedCalibrate)
+	ON_COMMAND(ID_CAL_RH_AND_TEMP, &CSerialCtrlDemoDlg::OnMenuClickedRHandTemp)
+	ON_BN_CLICKED(IDC_BUTTON_SAVE, &CSerialCtrlDemoDlg::OnBnClickedButtonSave)
+	ON_BN_CLICKED(IDC_BUTTON_CANCEL, &CSerialCtrlDemoDlg::OnBnClickedButtonCancel)
+END_MESSAGE_MAP()
+
+
+
+void CSerialCtrlDemoDlg::OnSysCommand(UINT nID, LPARAM lParam)
+{
+	if ((nID & 0xFFF0) == IDM_ABOUTBOX)
+	{
+		CAboutDlg dlgAbout;
+		dlgAbout.DoModal();
+	}
+	else
+	{
+		CDialog::OnSysCommand(nID, lParam);
+	}
+}
+
+
+// The system calls this function to obtain the cursor to display while the user drags
+//  the minimized window.
+HCURSOR CSerialCtrlDemoDlg::OnQueryDragIcon()
+{
+	return static_cast<HCURSOR>(m_hIcon);
+}
+
+
+void CSerialCtrlDemoDlg::OnOK()
+{
+	// TODO: Add your specialized code here and/or call the base class
+
+	//__super::OnOK();
+}
+
+
+
+UINT CSerialCtrlDemoDlg::StartTimer(UINT TimerDuration)
+{
+	UINT TimerVal;
+	TimerVal = (UINT)SetTimer(IDT_TIMER_0, TimerDuration, NULL);
+	if (TimerVal == 0)
+		MessageBox("Unable to obtain timer", "SYSTEM ERROR", MB_OK | MB_SYSTEMMODAL);
+	return TimerVal;
+}// end StartTimer
+
+bool CSerialCtrlDemoDlg::StopTimer(UINT TimerVal)
+{
+	if (!KillTimer(TimerVal)) return false;
+	else return true;
+} // end StopTimer
+
+void CSerialCtrlDemoDlg::OnBnClickedButtonAbout()
+{
+	CAboutDlg dlgAbout;
+	dlgAbout.DoModal();
+}
+
+
+int CSerialCtrlDemoDlg::OnCreate(LPCREATESTRUCT lpCreateStruct)
+{
+	if (CDialog::OnCreate(lpCreateStruct) == -1)
+		return -1;
+
+	// TODO: Add your specialized creation code here
+	SetWindowLong(this->m_hWnd,
+		GWL_STYLE,
+		GetWindowLong(this->m_hWnd, GWL_STYLE) | WS_MINIMIZEBOX | WS_MAXIMIZEBOX);
+
+	return 0;
+}
+
+
+int CSerialCtrlDemoDlg::OpenModbusSerialPorts()
+{
+	CString strOpenedPorts = "";
+	CString strResult;
+	TCHAR lpTargetPath[5000]; // buffer to store the path of the COMPORTS
+	DWORD test;
+	int NumberOfPortsOpened = 0;
+
+	for (int portIndex = 0; portIndex < m_TotalModbusPorts; portIndex++)
+	{
+		CString PortName, COMname;
+		COMname = arrModPorts[portIndex].ComPortName;
+		PortName.Format("\\\\.\\%s", COMname);
+
+		test = QueryDosDevice(COMname, (LPSTR)lpTargetPath, 5000);
+
+		if (::GetLastError() == ERROR_INSUFFICIENT_BUFFER)
+		{
+			lpTargetPath[10000]; // in case the buffer got filled, increase size of the buffer.
+			continue;
+		}
+		if (test != 0)
+		{
+			arrModPorts[portIndex].pMod->ClosePort();
+			if (arrModPorts[portIndex].pMod->OpenPort(PortName, 19200))
+			{
+				strResult.Format("%s READY, ", COMname);
+				NumberOfPortsOpened++;
+			}
+			else strResult.Format("CAN'T OPEN %s, ", COMname);
+		}
+		else strResult.Format("NO %s FOUND, ", PortName);
+		strOpenedPorts = strOpenedPorts + strResult;
+	}
+	m_EditStatus.SetWindowTextA(strOpenedPorts);
+	return NumberOfPortsOpened;
+}
+
+int CSerialCtrlDemoDlg::FindComPorts(CString *ptrComPortNames)
+{
+
+	TCHAR lpTargetPath[5000]; // buffer to store the path of the COMPORTS
+	DWORD test;
+	CString strNextPortName;
+	int portNameIndex = 0;
+
+	for (portNameIndex = 0; portNameIndex < 255; portNameIndex++)
+		ptrComPortNames[portNameIndex].Format("");
+
+	portNameIndex = 0;
+	for (int i = 1; i < 255; i++) // checking ports from COM0 to COM255
+	{
+		strNextPortName.Format("COM%d", i);
+		// ptrComPortNames[portNameIndex].Format("COM%d", i);
+
+		// test = QueryDosDevice(ptrComPortNames[portNameIndex], (LPSTR)lpTargetPath, 5000);
+		test = QueryDosDevice(strNextPortName, (LPSTR)lpTargetPath, 5000);
+		if (test != 0)
+		{
+			ptrComPortNames[portNameIndex] = strNextPortName;
+			portNameIndex++;
+		}
+
+		if (::GetLastError() == ERROR_INSUFFICIENT_BUFFER)
+		{
+			lpTargetPath[10000]; // in case the buffer got filled, increase size of the buffer.
+			continue;
+		}
+	}
+	return portNameIndex;
+}
+
+bool CSerialCtrlDemoDlg::SortSensorList(BYTE *ptrList, int NumberOfSensors)
+{
+	int i, j;
+	
+
+	if (ptrList == NULL) return false;
+	if (NumberOfSensors > MAX_SENSORS) return false;
+
+	for (i = 0; i < NumberOfSensors; i++)
+		SensorList[i] = ptrList[i];
+
+	for (i = 0; i < NumberOfSensors - 1; i++)
+	{
+		for (j = i+1; j < NumberOfSensors; j++)
+		{
+			if (SensorList[j] < SensorList[i])
+			{
+				BYTE temp;
+				temp = SensorList[i];
+				SensorList[i] = SensorList[j];
+				SensorList[j] = temp;
+			}
+		}
+	}
+	for (i = 0; i < NumberOfSensors; i++)
+		ptrList[i] = SensorList[i];
+
+	return true;
+}
+
+void CSerialCtrlDemoDlg::OnMenuClickedOpen()
+{
+	OpenFile();
+	//PrintFileHeader();
+}
+
+void CSerialCtrlDemoDlg::OnMenuClickedSaveAs()
+{
+	SaveFile();
+	//PrintFileHeader();
+}
+
+
+
+void CSerialCtrlDemoDlg::OnBnClickedButtonYes()
+{
+	
+}
+
+
+void CSerialCtrlDemoDlg::OnBnClickedButtonNo()
+{
+	
+}
+
+
+
+void CSerialCtrlDemoDlg::StartupMessage()
+{
+CString startMessage = "Copyright © 2018 Roscid Technologies Inc. All rights reserved. \
+\n\n\
+This SOFTWARE PRODUCT is provided by THE PROVIDER \"as is\" \
+and \"with all faults.\" THE PROVIDER makes no representations \
+or warranties of any kind concerning the safety, suitability, \
+lack of viruses, inaccuracies, typographical errors, \
+or other harmful components of this SOFTWARE PRODUCT. \
+\n\n\
+There are inherent dangers in the use of any software \
+and you are solely responsible for determining whether \
+this SOFTWARE PRODUCT is compatible with your equipment. \
+and other software installed on your equipment. \
+\n\n\
+You are also solely responsible for the protection \
+of your equipment and backup of your data, \
+and THE PROVIDER will not be liable for any damages \
+you may suffer in connection with using, modifying, \
+or distributing this SOFTWARE PRODUCT";
+
+AfxMessageBox(_T(startMessage), MB_OK);
+}
+
+
+
+void CSerialCtrlDemoDlg::OnBnClickedButtonNext()
+{
+	int status = 0;
+	if (stepNumber <= LAST_INSTRUCTION_STEP)
+	{	
+		status = SetupComPorts(stepNumber);
+		if (status == DONE) stepNumber++;
+		if (RunAutoSetup) StartTimer(TIMER_INTERVAL);		
+	}
+}
+
+void CSerialCtrlDemoDlg::OnBnClickedButtonPrevious()
+{	if (stepNumber > 0)
+	{
+		stepNumber = stepNumber - 2;
+		if (stepNumber < 0) stepNumber = 0;
+		SetupComPorts(stepNumber);
+	}
+}
+
+void CSerialCtrlDemoDlg::DisplayLog(CString newString)
+{
+	if (LogDisplayCounter < 32) LogDisplayCounter++;
+	else m_ListLog.DeleteString(32);
+
+	m_ListLog.InsertString(0, newString);		
+}
+
+void CSerialCtrlDemoDlg::ClearLog()
+{
+	m_ListLog.ResetContent();	
+	LogDisplayCounter = 0;
+}
+
+
+void CSerialCtrlDemoDlg::ClearInstructions()
+{
+	strInstructText = "";
+	m_EditInstruct.SetWindowTextA(strInstructText);
+}
+
+void CSerialCtrlDemoDlg::DisplayInstructions(CString strText, bool erase)
+{
+	CString strNewText;
+	if (erase) ClearInstructions();
+
+	strNewText.Format("%s\r\n", strText);
+	strInstructText = strInstructText + strNewText;
+	m_EditInstruct.SetWindowTextA(strInstructText);
+}
+
+bool CSerialCtrlDemoDlg::LoadConfig(CString ptrFilename)
+{
+	CString PortName;
+	std::string strLine;
+	char *ptrLine = NULL;
+	char delimiters[] = ", \r\n";
+	char *ptrSlaveID;
+	int portIndex = 0, sensorIndex = 0, pos;
+
+	if (GetFileAttributes(ptrFilename) == INVALID_FILE_ATTRIBUTES)
+		return false;
+
+	UINT16 SlaveID;
+
+	portIndex = 0;
+	m_totalSensorsFound = 0;
+
+	std::ifstream inFile(ptrFilename);
+
+	if (inFile)
+	{
+		while (std::getline(inFile, strLine))
+		{
+			ptrLine = _strdup(strLine.c_str());
+			if (ptrLine != NULL)
+			{
+				CString CSline(ptrLine);
+				pos = CSline.Find("COM");
+				if (pos != -1)
+				{
+					if (portIndex < MAX_NUMBER_OF_MODBUS_PORTS)
+					{
+						arrModPorts[portIndex].strSensors = CSline;
+						sensorIndex = 0;
+						if (CSline.Mid(pos + 4, 1) == " ") PortName = CSline.Mid(pos, 4); // Two possibilities, name is four characters, i.e. "COM7", 
+						else PortName = CSline.Mid(pos, 5);							  // ...or name has five characters, i.e. "COM19"	
+						arrModPorts[portIndex].ComPortName = PortName;
+						if (portIndex == 0) m_EditCom1.SetWindowTextA(PortName);
+						else m_EditCom2.SetWindowTextA(PortName);
+
+						if (strtok(ptrLine, delimiters) != NULL)
+						{
+							do {
+								ptrSlaveID = strtok(NULL, delimiters);
+								if (ptrSlaveID)
+								{
+									SlaveID = (UINT16)atoi(ptrSlaveID);
+									if (SlaveID < 256)
+									{
+										arrModPorts[portIndex].SensorID[sensorIndex] = (BYTE)SlaveID;
+										sensorIndex++;
+									}
+								}
+								else break;
+							} while (sensorIndex < MAX_SENSORS);
+						}
+						int NumSensors;
+						NumSensors = arrModPorts[portIndex].NumberOfSensors = sensorIndex;
+						SortSensorList(arrModPorts[portIndex].SensorID, NumSensors);
+						m_totalSensorsFound = m_totalSensorsFound + NumSensors;
+						portIndex++;
+					}
+				}
+				std::free(ptrLine);
+			}
+		}
+		inFile.close();
+		m_TotalModbusPorts = portIndex;
+		DisplayPortSensors();
+	}
+	else return false;
+	return true;
+}
+
+
+void CSerialCtrlDemoDlg::DisplayPortSensors()
+{
+	int portNUmber, j;
+	CString strSensors, strNextSensor;
+	for (portNUmber = 0; portNUmber < m_TotalModbusPorts; portNUmber++)
+	{
+		strSensors = "";
+		for (j = 0; j < arrModPorts[portNUmber].NumberOfSensors; j++)
+		{
+			CString strNextSensor;
+
+			if (j == arrModPorts[portNUmber].NumberOfSensors - 1)
+				strNextSensor.Format("%d", arrModPorts[portNUmber].SensorID[j]);
+			else strNextSensor.Format("%d,", arrModPorts[portNUmber].SensorID[j]);
+			strSensors = strSensors + strNextSensor;
+		}
+		if (portNUmber == 0) m_EditPort1.SetWindowTextA(strSensors);
+		else if (portNUmber == 1) m_EditPort2.SetWindowTextA(strSensors);
+	}
+}
+
+
+
+
+void CSerialCtrlDemoDlg::CreateTimeDateString(CString *ptrTimeDate)
+{
+	struct tm  tstruct;
+	time_t now = time(0);
+	localtime_s(&tstruct, &now);
+	char timeBuffer[256];
+	strftime(timeBuffer, sizeof(timeBuffer), "%m-%d-%y, %H:%M:%S, ", &tstruct);
+	CString strTimeBuffer(timeBuffer);
+	*ptrTimeDate = strTimeBuffer;
+}
+
+
+
+
+void CSerialCtrlDemoDlg::HideSetupButtons()
+{
+	m_btnYes.ShowWindow(false);
+	m_btnYes.EnableWindow(false);
+	m_btnNo.ShowWindow(false);
+	m_btnNo.EnableWindow(false);
+	m_btnStart.ShowWindow(false);
+	m_btnStart.EnableWindow(false);
+	m_btnPrevious.ShowWindow(false);
+	m_btnPrevious.EnableWindow(false);
+	m_btnQuit.ShowWindow(false);
+	m_btnQuit.EnableWindow(false);
+	m_btnNext.ShowWindow(false);
+	m_btnNext.EnableWindow(false);	
+}
+
+void CSerialCtrlDemoDlg::ShowAllButtons()
+{
+	m_btnYes.ShowWindow(true);
+	m_btnYes.EnableWindow(true);
+	m_btnNo.ShowWindow(true);
+	m_btnNo.EnableWindow(true);
+	m_btnStart.ShowWindow(true);
+	m_btnStart.EnableWindow(true);
+	m_btnPrevious.ShowWindow(true);
+	m_btnPrevious.EnableWindow(true);
+	m_btnQuit.ShowWindow(true);
+	m_btnQuit.EnableWindow(true);
+	m_btnNext.ShowWindow(true);
+	m_btnNext.EnableWindow(true);
+	
+}
+
+
+void CSerialCtrlDemoDlg::ShowSetupButtons()
+{
+	m_btnYes.ShowWindow(false);
+	m_btnYes.EnableWindow(false);
+	m_btnNo.ShowWindow(false);
+	m_btnNo.EnableWindow(false);
+	m_btnStart.ShowWindow(true);
+	m_btnStart.EnableWindow(true);
+	m_btnPrevious.ShowWindow(true);
+	m_btnPrevious.EnableWindow(true);
+	m_btnQuit.ShowWindow(true);
+	m_btnQuit.EnableWindow(true);
+	m_btnNext.ShowWindow(true);
+	m_btnNext.EnableWindow(true);	
+}
+
+void CSerialCtrlDemoDlg::ShowSaveCancelButtons()
+{
+	m_btnSave.ShowWindow(true);
+	m_btnSave.EnableWindow(true);
+	m_btnCancel.ShowWindow(true);
+	m_btnCancel.EnableWindow(true);
+}
+
+void CSerialCtrlDemoDlg::HideSaveCancelButtons()
+{
+	m_btnSave.ShowWindow(false);
+	m_btnSave.EnableWindow(false);
+	m_btnCancel.ShowWindow(false);
+	m_btnCancel.EnableWindow(false);
+}
+
+void CSerialCtrlDemoDlg::OnBnClickedButtonCancel()
+{
+	DisplayInstructions("Port and sensor configuration cancelled.\r\nExisting settings will be used.", true);
+	HideSetupButtons();
+	HideSaveCancelButtons();
+	LoadConfig(ConfigFilename);
+}
+
+bool CSerialCtrlDemoDlg::SaveManuallyEnteredSensors()
+{
+	// int i;
+	CString strCom1, strPort1, strCom2, strPort2, strLine1, strLine2;
+
+
+	m_EditCom1.GetWindowTextA(strCom1);
+	m_EditCom2.GetWindowTextA(strCom2);
+	m_EditPort1.GetWindowTextA(strPort1);
+	m_EditPort2.GetWindowTextA(strPort2);
+
+	strLine1.Format("%s %s\n", strCom1, strPort1);
+	strLine2.Format("%s %s\n", strCom2, strPort2);
+
+	std::ofstream outFile;
+
+	outFile.open(ConfigFilename);
+	outFile << strLine1;
+	outFile << strLine2;
+	outFile.close();
+
+	return true;
+}
+
+
+// If you add a minimize button to your dialog, you will need the code below
+//  to draw the icon.  For MFC applications using the document/view model,
+//  this is automatically done for you by the framework.
+void CSerialCtrlDemoDlg::OnPaint()
+{
+	if (IsIconic())
+	{
+		CPaintDC dc(this); // device context for painting
+
+		SendMessage(WM_ICONERASEBKGND, reinterpret_cast<WPARAM>(dc.GetSafeHdc()), 0);
+
+		// Center icon in client rectangle
+		int cxIcon = GetSystemMetrics(SM_CXICON);
+		int cyIcon = GetSystemMetrics(SM_CYICON);
+		CRect rect;
+		GetClientRect(&rect);
+		int x = (rect.Width() - cxIcon + 1) / 2;
+		int y = (rect.Height() - cyIcon + 1) / 2;
+
+		// Draw the icon
+		dc.DrawIcon(x, y, m_hIcon);
+	}
+	else
+	{
+		CDialog::OnPaint();
+	}
+}
+
+
+
+void CSerialCtrlDemoDlg::DisableRunButton()
+{
+	m_btnRun.EnableWindow(false);
+}
+
+void CSerialCtrlDemoDlg::EnableRunButton()
+{
+	m_btnRun.EnableWindow(true);
+}
+
+void CSerialCtrlDemoDlg::DisableRunAndHaltButtons()
+{
+	m_btnRun.EnableWindow(false);
+	m_btnHalt.EnableWindow(false);
+}
+
+
+
+void CSerialCtrlDemoDlg::OnBnClickedComPortAutoSetup()
+{
+	if (RunDataLogFlag)
+	{
+		AfxMessageBox(_T("Please click HALT to stop data logging\n\rbefore modifying serial port settings"), MB_OK);
+	}
+	else
+	{
+		// AfxMessageBox(_T("Click START"), MB_OK);
+		ShowSetupButtons();
+		HideSaveCancelButtons();
+		m_EditInstruct.SetWindowTextA("Click START to begin serial port and sensor configuration.");
+		DisableRunAndHaltButtons();
+	}
+}
+
+
+void CSerialCtrlDemoDlg::OnBnClickedButtonStart()
+{
+	stepNumber = 0;	
+	SetupComPorts(stepNumber++);
+	DisableRunAndHaltButtons();
+}
+
+void CSerialCtrlDemoDlg::OnBnClickedButtonSave()
+{
+	DisplayInstructions("New port and sensor assignments have been saved", true);
+	HideSetupButtons();
+	SaveManuallyEnteredSensors();
+	LoadConfig(ConfigFilename);
+	EnableRunAndHaltButtons();
+}
+
+
+
+void CSerialCtrlDemoDlg::OnBnClickedButtonQuit()
+{
+	if (LoadConfig(ConfigFilename))
+	{
+		ClearInstructions();
+		EnableRunAndHaltButtons();
+		HideSetupButtons();
+		stepNumber = 0;
+	}
+	RunDataLogFlag = false;
+	RunAutoSetup = false;
+	StopTimer(TIMER_INTERVAL);
+}
+
+
+
+void CSerialCtrlDemoDlg::EnableRunAndHaltButtons()
+{
+	m_btnRun.EnableWindow(true);
+	m_btnHalt.EnableWindow(false);
+}
+
+void CSerialCtrlDemoDlg::EnableHaltButton()
+{
+	m_btnHalt.EnableWindow(true);
+}
+
+
+bool CSerialCtrlDemoDlg::StoreConfig(CString ptrStartupFilename, ModbusPort *ptrModPorts)
+{
+	int portIndex, j;  // $$$$
+	CString strSensorID = "";
+	CString strSensors = "";
+	std::ofstream myfile;
+
+	if (ptrStartupFilename == "") return FALSE;
+
+	myfile.open(ptrStartupFilename);
+	
+	for (portIndex = 0; portIndex < m_TotalModbusPorts; portIndex++)
+	{
+		strSensors = "";
+		for (j = 0; j < ptrModPorts[portIndex].NumberOfSensors; j++)
+		{
+			if (j == ptrModPorts[portIndex].NumberOfSensors - 1)
+				strSensorID.Format("%d", ptrModPorts[portIndex].SensorID[j]);
+			else strSensorID.Format("%d,", ptrModPorts[portIndex].SensorID[j]);
+			strSensors = strSensors + strSensorID;
+		}
+		if (portIndex == 0)
+		{
+			m_EditCom1.SetWindowTextA(ptrModPorts[portIndex].ComPortName);
+			m_EditPort1.SetWindowTextA(strSensors);
+		}
+		else if (portIndex == 1)
+		{
+			m_EditCom2.SetWindowTextA(ptrModPorts[portIndex].ComPortName);
+			m_EditPort2.SetWindowTextA(strSensors);
+		}
+		myfile << ptrModPorts[portIndex].ComPortName << " " << strSensors << "\r\n";
+	}
+	myfile.close();
+	return TRUE;
+}
+
+
+void CSerialCtrlDemoDlg::OpenFile()
+{
+	char filename[MAX_PATH]; // Default filename
+	strcpy_s(filename, CStringA(m_LogFileName).GetString());
+	OPENFILENAME ofn;
+	// ZeroMemory(&filename, sizeof(filename));
+	ZeroMemory(&ofn, sizeof(ofn));
+	ofn.lStructSize = sizeof(ofn);
+	ofn.hwndOwner = NULL;  // If you have a window to center over, put its HANDLE here
+	ofn.lpstrFilter = "Comma delimited (CSV)\0*.csv\0Any File\0*.*\0";
+	ofn.lpstrFile = filename;
+	ofn.nMaxFile = MAX_PATH;
+	ofn.lpstrTitle = "Open Existing File To Log New Data";
+	ofn.Flags = OFN_DONTADDTORECENT | OFN_FILEMUSTEXIST;
+
+	if (GetOpenFileName(&ofn))
+	{
+		m_LogFileName.Format("%s", filename);
+		if (m_LogFileName.Find(".csv") == -1)
+			m_LogFileName = m_LogFileName + ".csv";
+		// Open file with append option
+		// m_LogFile.open(m_LogFileName, std::ofstream::in | std::ofstream::out | std::ofstream::app);
+		CString strLogging;
+		strLogging.Format("Data log file: %s", m_LogFileName);
+		m_EditStatus.SetWindowTextA(strLogging);
+	}
+
+	// Now simply display the file name 
+	// MessageBox(NULL, ofn.lpstrFile, "File Name", MB_OK);
+}
+
+// This routine prompts the user to enter a filename for data logging.
+// A dialog box opens which allows the filename to be entered
+// along with a folder and path anywhere on the hard drive.
+// The extension ".csv" is automatically appended to the filename.
+// If a valid name is entered, the file is opened for logging.
+void CSerialCtrlDemoDlg::SaveFile()
+{
+	char filename[MAX_PATH]; // Default filename
+	strcpy_s(filename, CStringA(m_LogFileName).GetString());
+	OPENFILENAME ofn;
+	// ZeroMemory(&filename, sizeof(filename));
+	ZeroMemory(&ofn, sizeof(ofn));
+	ofn.lStructSize = sizeof(ofn);
+	ofn.hwndOwner = NULL;  // If you have a window to center over, put its HANDLE here
+	ofn.lpstrFilter = "Comma delimited (CSV)\0*.csv\0Any File\0*.*\0";
+	ofn.lpstrFile = filename;
+	ofn.nMaxFile = MAX_PATH;
+	ofn.lpstrTitle = "Save New Log file As";
+	ofn.Flags = OFN_DONTADDTORECENT | OFN_FILEMUSTEXIST;
+
+	if (GetSaveFileNameA(&ofn))
+	{
+		m_LogFileName.Format("%s", filename);
+		if (m_LogFileName.Find(".csv") == -1)
+			m_LogFileName = m_LogFileName + ".csv";
+		CString strLogging;
+		strLogging.Format("Data log file: %s", m_LogFileName);
+		m_EditStatus.SetWindowTextA(strLogging);
+	}
+}
+
+
+void CSerialCtrlDemoDlg::DisplayDataLogMessage()
+{
+	DisplayInstructions("Use \"File/Open\" or \"File/Save As\" to create data logging file.", false);
+	DisplayInstructions("Click RUN to begin data logging.", false);
+}
+
+
+void CSerialCtrlDemoDlg::OnTimer(UINT_PTR TimerVal)
+{
+	if (!KillTimer(TimerVal))
+	{
+		;
+	}
+	if (TestHandler())
+		StartTimer(TIMER_INTERVAL);
+}
+
+bool CSerialCtrlDemoDlg::TestHandler()
+{
+	bool SerialPortsWorking = true;
+	int status;
+	if (RunDataLogFlag)
+	{
+		SerialPortsWorking = LogData(ResetFlag);
+		if (!SerialPortsWorking)
+		{
+			StopTimer(TIMER_INTERVAL);
+			ResetFlag = true;
+			DisplayLog("ERROR: CANNOT COMMUNICATE WITH SENSORS.\n\n");
+			return false;
+		}
+		ResetFlag = false;
+		return true;
+	}
+	else if (RunAutoSetup)
+	{
+		DisableRunButton();
+		status = SetupComPorts(stepNumber);
+		if (DONE == status)	stepNumber++;
+		if (!RunAutoSetup) return false;
+		else return true;
+	}
+	else return false;
+}
+
+void CSerialCtrlDemoDlg::OnBnClickedCheckboxCelsius()
+{
+	EnableTemperatureLogging = true;
+	UseTempCelsius = true;
+}
+
+void CSerialCtrlDemoDlg::OnBnClickedCheckboxFahrenheit()
+{
+	EnableTemperatureLogging = true;
+	UseTempCelsius = false;
+}
+
+void CSerialCtrlDemoDlg::OnBnClickedCheckboxNoTemp()
+{
+	EnableTemperatureLogging = false;
+	UseTempCelsius = false;
+}
+
+bool CSerialCtrlDemoDlg::SetLoggingInterval()
+{
+	int logIntervalSeconds = 0, logIntervalMinutes = 0, logIntervalHours = 0, totalLogIntervalSeconds = 0;
+	CString strHours, strMinutes, strSeconds;
+
+	// Get desired logging interval from Edit boxes
+	m_EditLogIntervalSeconds.GetWindowTextA(strSeconds);
+	if (strSeconds.GetLength() == 0) logIntervalSeconds = 0;
+	else logIntervalSeconds = atoi(strSeconds);
+
+	m_EditLogIntervalMinutes.GetWindowTextA(strMinutes);
+	if (strMinutes.GetLength() == 0) logIntervalMinutes = 0;
+	else logIntervalMinutes = atoi(strMinutes);
+
+	m_EditLogIntervalHours.GetWindowTextA(strHours);
+	if (strHours.GetLength() == 0) logIntervalHours = 0;
+	else logIntervalHours = atoi(strHours);
+
+
+	// Make sure logging interval is valid; adjust if necessary.
+	if (logIntervalHours == 0 && logIntervalMinutes == 0 && logIntervalSeconds == 0)
+		logIntervalMinutes = 1;
+
+	if (logIntervalSeconds >= 60)
+	{
+		logIntervalMinutes = logIntervalMinutes + (logIntervalSeconds / 60);
+		logIntervalSeconds = logIntervalSeconds % 60;
+	}
+
+	if (logIntervalMinutes >= 60)
+	{
+		logIntervalHours = logIntervalHours + (logIntervalMinutes / 60);
+		logIntervalMinutes = logIntervalMinutes % 60;
+	}	
+
+	totalLogIntervalSeconds = logIntervalSeconds + (logIntervalMinutes * 60) + (logIntervalHours * 3600);
+
+	if (totalLogIntervalSeconds > (60 * 60 * 24))
+	{
+		logIntervalHours = 24;
+		logIntervalMinutes = 0;
+		logIntervalSeconds = 0;
+	}
+
+	// Display corrected logging interval
+	strSeconds.Format("%d", logIntervalSeconds);
+	strMinutes.Format("%d", logIntervalMinutes );
+	strHours.Format("%d", logIntervalHours);
+
+	m_EditLogIntervalSeconds.SetWindowTextA(strSeconds);
+	m_EditLogIntervalMinutes.SetWindowTextA(strMinutes);
+	m_EditLogIntervalHours.SetWindowTextA(strHours);
+
+	// Store new logging interval in config file
+	m_SD.m_LoggingHours = logIntervalHours;
+	m_SD.m_LoggingMinutes = logIntervalMinutes;
+	m_SD.m_LoggingSeconds = logIntervalSeconds;
+	m_SD.WriteConfigFile();
+
+	return true;
+}
+
+
+
+
+	
+
+BOOL CSerialCtrlDemoDlg::OnInitDialog()
+{
+	ptrDialog = this;
+
+	CDialog::OnInitDialog();
+	m_totalSensorsFound = 0;
+
+	// Add "About..." menu item to system menu.
+
+	// IDM_ABOUTBOX must be in the system command range.
+	ASSERT((IDM_ABOUTBOX & 0xFFF0) == IDM_ABOUTBOX);
+	ASSERT(IDM_ABOUTBOX < 0xF000);
+
+	CMenu* pSysMenu = GetSystemMenu(FALSE);
+	if (pSysMenu != NULL)
+	{
+		CString strAboutMenu;
+		strAboutMenu.LoadString(IDS_ABOUTBOX);
+		if (!strAboutMenu.IsEmpty())
+		{
+			pSysMenu->AppendMenu(MF_SEPARATOR);
+			pSysMenu->AppendMenu(MF_STRING, IDM_ABOUTBOX, strAboutMenu);
+		}
+	}
+
+	// Set the icon for this dialog.  The framework does this automatically
+	//  when the application's main window is not a dialog
+	SetIcon(m_hIcon, TRUE);			// Set big icon
+	SetIcon(m_hIcon, FALSE);		// Set small icon
+
+	ClearLog();
+
+	RunEnable = LoadConfig(ConfigFilename);
+	if (RunEnable)
+	{
+		OpenModbusSerialPorts();
+		EnableRunAndHaltButtons();
+		HideSetupButtons();
+		m_EditInstruct.SetWindowTextA("Click RUN to begin datalogging");
+		ClearInstructions();
+		DisplayDataLogMessage();
+	}
+	else
+	{
+		DisableRunAndHaltButtons();
+		ShowSetupButtons();
+		DisplayInstructions("This is the Roscid Modbus serial port setup wizard.\r\nClick START to begin.", true);
+	}
+	HideSaveCancelButtons();
+
+	memset(&logfont, 0, sizeof(LOGFONT));    // clear out structure 
+	logfont.lfHeight = 18;   // Set pixel size
+	logfont.lfWeight = FW_NORMAL; // FW_BOLD;
+	_tcsncpy_s(logfont.lfFaceName, LF_FACESIZE, _T("Arial"), 20);  // Set font
+	BigFont.CreateFontIndirect(&logfont);  // create the font
+
+	m_EditInstruct.SetFont(&BigFont);
+
+	memset(&logfont, 0, sizeof(LOGFONT));    // clear out structure 
+	logfont.lfHeight = 17;   // Set pixel size
+	logfont.lfWeight = FW_NORMAL; // FW_BOLD;
+	_tcsncpy_s(logfont.lfFaceName, LF_FACESIZE, _T("Arial"), 16);  // Set font
+	MediumFont.CreateFontIndirect(&logfont);  // create the font
+
+	m_ListLog.SetFont(&MediumFont);
+
+	StartupMessage(); // Display start up message in instruction edit box	
+
+	m_CheckBoxCelsius.SetCheck(true);
+
+	m_CheckBoxNoTemperature.EnableWindow(true);
+	m_CheckBoxCelsius.EnableWindow(true);
+	m_CheckBoxFahrenheit.EnableWindow(true);
+
+	// Display the logging period in hours minutes and seconds:
+	CString strHours, strMinutes, strSeconds;
+	strHours.Format("%d", m_SD.m_LoggingHours);
+	strMinutes.Format("%d", m_SD.m_LoggingMinutes);
+	strSeconds.Format("%d", m_SD.m_LoggingSeconds);
+	
+	m_EditLogIntervalSeconds.SetWindowTextA(strSeconds);
+	m_EditLogIntervalMinutes.SetWindowTextA(strMinutes);
+	m_EditLogIntervalHours.SetWindowTextA(strHours);
+
+	m_DlgSetup.SetPointerToSD(&m_SD);
+	
+	// MessageBoxExA(NULL, (LPCSTR)"This is a test message", (LPCSTR)"COM ERROR ALERT", MB_ICONEXCLAMATION | MB_OK, 0);
+
+	return TRUE;  // return TRUE  unless you set the focus to a control
+}
+
+
+void CSerialCtrlDemoDlg::HaltProcess()
+{
+	ResetFlag = true;
+	GetCalTableFlag = false;
+	RunDataLogFlag = false;
+	RunAutoSetup = false;
+
+	m_btnHalt.EnableWindow(false);
+	m_btnRun.EnableWindow(true);
+
+	StopTimer(TIMER_INTERVAL);
+	EnableRunButton();
+	DisplayInstructions("Data logging is halted.\r\nClick RUN to resume logging.", true);
+
+	m_CheckBoxNoTemperature.EnableWindow(true);
+	m_CheckBoxCelsius.EnableWindow(true);
+	m_CheckBoxFahrenheit.EnableWindow(true);
+	m_EditLogIntervalSeconds.EnableWindow(true);
+	m_EditLogIntervalMinutes.EnableWindow(true);
+	m_EditLogIntervalHours.EnableWindow(true);
+}
+
+
+void CSerialCtrlDemoDlg::OnMenuClickedRHandTemp()
+{
+	HaltProcess();
+	m_DlgSetup.DoModal();
+}
+
+bool CSerialCtrlDemoDlg::LogData(bool ResetFlag)
+{
+	UINT16 arrReadData[MAX_DATA_REGISTERS];
+	int SensorResponse;
+	CString strErrors;
+	CString strDisplayData = "", strSensorRH = "", strSensorTemp = "", strSensorRHandTemp = "";
+	static CString strDataLog = "";
+	static CString strTimeDate = "";
+	CString strRHSensor;
+	CString strLogStatus = "";
+	static int sensorIndex = 0;
+	static bool EnableLogging = false;
+	static int LogPortIndex = 0;
+	static bool COMerrorFlag = false;
+	static bool NoSensorsFlag = false;
+	static int NumberOfLogs = 0;
+	static int TotalNumberOfSensors = 0;		
+	int portIndex = 0;
+
+	if (m_totalSensorsFound == 0)
+	{
+		DisplayInstructions("ERROR! Can't run logger without sensors! Please run Setup.", true);
+		return false;
+	}
+
+	if (ResetFlag)
+	{
+		sensorIndex = LogPortIndex = TotalNumberOfSensors = 0;
+		for (portIndex = 0; portIndex < m_TotalModbusPorts; portIndex++)// $$$$
+		{
+			arrModPorts[portIndex].NumberOfRHComFailures = 0;
+			arrModPorts[portIndex].NumberOfTEMPComFailures = 0;
+			TotalNumberOfSensors = TotalNumberOfSensors + arrModPorts[portIndex].NumberOfSensors;
+		}		
+		COMerrorFlag = false;
+		EnableLogging = false;
+		NumberOfLogs = 0;
+		ClearInstructions();
+	}
+
+	if (m_TotalModbusPorts < 0)
+	{
+		m_TotalModbusPorts = 0;
+		return false;
+	}
+	if (m_TotalModbusPorts > MAX_NUMBER_OF_MODBUS_PORTS) m_TotalModbusPorts = MAX_NUMBER_OF_MODBUS_PORTS;
+
+	// Make sure serial port is open. If it isn't, something is seriously wrong!
+	if (!arrModPorts[LogPortIndex].pMod->GetPortStatus())
+	{
+		strErrors.Format("ERROR: %s port not open", arrModPorts[LogPortIndex].ComPortName);
+		DisplayInstructions(strErrors, true);
+		return false;
+	}
+
+	/*
+	if (sensorIndex >= arrModPorts[LogPortIndex].NumberOfSensors)
+	{
+		sensorIndex = 0;		
+		LogPortIndex++;
+		if (LogPortIndex >= m_TotalModbusPorts)
+		{
+			LogPortIndex = 0;
+			EnableLogging = true;
+		}
+	}
+	*/
+	int loopCounter = 0;
+	if (sensorIndex >= arrModPorts[LogPortIndex].NumberOfSensors)
+	{
+		sensorIndex = 0;		
+		do {
+			LogPortIndex++;
+			if (LogPortIndex >= m_TotalModbusPorts)
+			{
+				LogPortIndex = 0;		
+				loopCounter++;
+				// This should never occur, but just in case it does, quit here to avoid endless loop:
+				if (loopCounter > 1)
+				{
+					DisplayInstructions("SYSTEM ERROR: NO SENSORS FOUND", false);
+					return false;
+				}
+				EnableLogging = true;
+			}
+		} while (arrModPorts[LogPortIndex].NumberOfSensors == 0);
+	}
+
+	BYTE SlaveID = arrModPorts[LogPortIndex].SensorID[sensorIndex];
+
+	SensorResponse = arrModPorts[LogPortIndex].pMod->ReadModbusInputRegister(SlaveID, RH_INPUT_ADDRESS, 1, arrReadData, &strErrors);
+	if (SensorResponse == SENSOR_RESPONSE_OK)
+	{
+		double dblRH = (double)arrReadData[0];
+		dblRH = dblRH / 10.0;
+		if (dblRH > MAX_PRECENT_RH) dblRH = MAX_PRECENT_RH;
+		arrModPorts[LogPortIndex].SensorRH[sensorIndex] = dblRH;
+		strSensorRH.Format("Sensor #%d: RH = %0.1f%%, ", SlaveID, dblRH);
+	}
+	else
+	{
+		COMerrorFlag = true;
+		arrModPorts[LogPortIndex].SensorRH[sensorIndex] = 0.0;
+		strSensorRH.Format("Sensor #%d: No Response, ", SlaveID);
+		arrModPorts[LogPortIndex].NumberOfRHComFailures++;
+	}
+
+	if (EnableTemperatureLogging)
+	{
+		if (UseTempCelsius)	SensorResponse = arrModPorts[LogPortIndex].pMod->ReadModbusInputRegister(SlaveID, TEMPERATURE_CELSIUS_INPUT_ADDRESS, 1, arrReadData, &strErrors);
+		else SensorResponse = arrModPorts[LogPortIndex].pMod->ReadModbusInputRegister(SlaveID, TEMPERATURE_FAHRENHEIT_INPUT_ADDRESS, 1, arrReadData, &strErrors);
+
+		if (SensorResponse == SENSOR_RESPONSE_OK)
+		{
+			double dblTemp = (double)arrReadData[0];
+			dblTemp = dblTemp / 10.0;
+			arrModPorts[LogPortIndex].SensorTemperatureCelsius[sensorIndex] = dblTemp;
+			if (UseTempCelsius)	strSensorTemp.Format("Temp = %0.1f° C", dblTemp);
+			else strSensorTemp.Format("Temp = %0.1f° F", dblTemp);
+		}
+		else
+		{
+			COMerrorFlag = true;
+			arrModPorts[LogPortIndex].SensorTemperatureCelsius[sensorIndex] = 0.0;
+			strSensorTemp.Format("No Response");
+			arrModPorts[LogPortIndex].NumberOfTEMPComFailures++;
+		}
+	}
+
+	if (EnableTemperatureLogging) strDisplayData = strSensorRH + strSensorTemp;
+	else strDisplayData = strSensorRH;
+	DisplayLog(strDisplayData);
+	
+	// Advance to next sensor
+	sensorIndex++;
+
+	// If another logging period has elapsed, write latest data to file now:
+	if (IsLogTime(ResetFlag) && EnableLogging)
+	{
+#ifdef CUSTOMER_VERSION  // For customer software, hide com errors
+		COMerrorFlag = false;
+#endif
+		if (COMerrorFlag)
+		{
+			ClearInstructions();
+			for (portIndex = 0; portIndex < m_TotalModbusPorts; portIndex++)  // $$$$
+			{	
+				if (arrModPorts[portIndex].NumberOfRHComFailures == 0 && arrModPorts[portIndex].NumberOfTEMPComFailures == 0)
+					strErrors.Format("%s OK, no errors", arrModPorts[portIndex].ComPortName);
+				else strErrors.Format("%s Errors: %d RH errors, %d temp errors", arrModPorts[portIndex].ComPortName, arrModPorts[portIndex].NumberOfRHComFailures, arrModPorts[portIndex].NumberOfTEMPComFailures);
+				DisplayInstructions(strErrors, false);
+			}
+			
+		}
+		else
+		{
+			strErrors.Format("Total ports: %d, total sensors: %d, total logs: %d", m_TotalModbusPorts, TotalNumberOfSensors, ++NumberOfLogs);
+			DisplayInstructions(strErrors, true);
+		}
+
+		CreateTimeDateString(&strTimeDate);
+		strDataLog = strTimeDate;
+		for (portIndex = 0; portIndex < m_TotalModbusPorts; portIndex++)   // $$$$
+		{
+			for (int i = 0; i < arrModPorts[portIndex].NumberOfSensors; i++)
+			{
+				// No temperature logging, just record RH
+				if (!EnableTemperatureLogging) strSensorRHandTemp.Format("%0.1f, ", arrModPorts[portIndex].SensorRH[i]);
+				// Log RH and Temperature Celsius
+				else if (UseTempCelsius) strSensorRHandTemp.Format("%0.1f, %0.1f,", arrModPorts[portIndex].SensorRH[i], arrModPorts[portIndex].SensorTemperatureCelsius[i]);
+				// Log RH and Temperature Fahrenheit
+				else strSensorRHandTemp.Format("%0.1f, %0.1f,", arrModPorts[portIndex].SensorRH[i], arrModPorts[portIndex].SensorTemperatureFahrenheit[i]);
+				strDataLog = strDataLog + strSensorRHandTemp;
+			}
+		}
+
+		if (m_LogFileName.GetLength() > 4)
+		{
+			m_LogFile.open(m_LogFileName, std::ofstream::in | std::ofstream::out | std::ofstream::app);
+			m_LogFile << strDataLog << "\n";
+			m_LogFile.close();
+			strLogStatus.Format("Datalog file %s:  %s Total sensors: %d", m_LogFileName, strTimeDate, TotalNumberOfSensors);
+			m_EditStatus.SetWindowTextA(strLogStatus);
+		}
+	}
+
+	return true;
+}
+
+void CSerialCtrlDemoDlg::OnBnClickedHalt()
+{
+	ResetFlag = true;
+	GetCalTableFlag = false;
+	RunDataLogFlag = false;
+	RunAutoSetup = false;
+
+	m_btnHalt.EnableWindow(false);
+	m_btnRun.EnableWindow(true);
+
+	StopTimer(TIMER_INTERVAL);
+	EnableRunButton();
+	
+	m_EditStatus.SetWindowTextA("Data logging is halted. Click RUN to resume logging.");
+
+	m_CheckBoxNoTemperature.EnableWindow(true);
+	m_CheckBoxCelsius.EnableWindow(true);
+	m_CheckBoxFahrenheit.EnableWindow(true);
+	m_EditLogIntervalSeconds.EnableWindow(true);
+	m_EditLogIntervalMinutes.EnableWindow(true);
+	m_EditLogIntervalHours.EnableWindow(true);
+}
+
+
+bool CSerialCtrlDemoDlg::IsLogTime(bool &ResetFlag)
+{
+	static long StartSeconds = 0, CurrentSeconds = 0, LogIntervalSeconds = 0;
+	static long StartMinutes = 0, CurrentMinutes = 0;
+	static long StartHours = 0, CurrentHours = 0;
+	static long PreviousHours = 0;
+	static long TotalSeconds;
+	struct tm  tstruct;
+
+
+	// Get the current time in hours minutes and seconds, and convert to just seconds:
+	time_t now = time(0);
+	localtime_s(&tstruct, &now);
+	char CurrentTimeHours[8], CurrentTimeMinutes[8], CurrentTimeSeconds[8];
+
+	strftime(CurrentTimeSeconds, sizeof(CurrentTimeSeconds), "%S", &tstruct);
+	CurrentSeconds = atoi(CurrentTimeSeconds);
+	strftime(CurrentTimeMinutes, sizeof(CurrentTimeMinutes), "%M", &tstruct);
+	CurrentMinutes = atoi(CurrentTimeMinutes);
+	strftime(CurrentTimeHours, sizeof(CurrentTimeHours), "%H", &tstruct);
+	CurrentHours = atoi(CurrentTimeHours);
+
+	TotalSeconds = CurrentSeconds + (CurrentMinutes * 60) + (CurrentHours * 3600);
+
+	// If logging just started, set the starting time and return TRUE to log first data
+	if (ResetFlag)
+	{
+		ResetFlag = false;
+		StartSeconds = TotalSeconds;
+		PreviousHours = CurrentHours;
+		return true;
+	}
+	
+	// When time rolls overs at midnight, move up start time by subtracting a full day from it. 
+	// Example: log interval is four minutes or 480 seconds.
+	// So if the log interval is four minutes and the start time was two minutes before midnight, 
+	// the next log should occur at two minutes after midnight.
+	//
+	// So Start time = 240 seconds before midnight which is 86160 seconds total.
+	// At midnight, a full day is subtracted from start seconds: StartSeconds = StartSeconds - one day = 86160 - (60 * 60 * 24) = -240 seconds,
+	// When time reaches two minutes after midnight, the current time will be 240 seconds total.
+	// The elapsed seconds is: ElapsedSeconds = TotalSeconds - StartSeconds = 240 - (-240) = 480 seconds,
+	// So the log occurs at two minutes after midnight as expected.
+	
+	// When time rolls over at midnight, subtract one day from start time.
+	// This should only happen once each day. If not, something is very wrong!
+	if (CurrentHours < PreviousHours) StartSeconds = StartSeconds - (60 * 60 * 24);
+	PreviousHours = CurrentHours;
+
+	// Get seconds elapsed since last log:
+	int ElapsedSeconds = TotalSeconds - StartSeconds;
+
+	// The desired log interval in seconds is:
+	LogIntervalSeconds = (int)((m_SD.m_LoggingHours * 3600) + (m_SD.m_LoggingMinutes * 60) + m_SD.m_LoggingSeconds);
+
+	// Now determine whether it's time to log more data. If it is, return TRUE
+	// and start next logging period:
+	if (ElapsedSeconds >= LogIntervalSeconds)
+	{
+		StartSeconds = TotalSeconds;
+		return true;
+	}
+	else return false;
+}
+
+
+bool CSerialCtrlDemoDlg::PrintFileHeader()
+{
+	int i, portIndex;
+	CString strSensor, strHeader = "DATE, TIME, ";
+
+	if (m_LogFileName.GetLength() > 4)
+	{
+		for (portIndex = 0; portIndex < m_TotalModbusPorts; portIndex++)
+		{
+			for (i = 0; i < arrModPorts[portIndex].NumberOfSensors; i++)
+			{
+				if (!EnableTemperatureLogging)
+				{
+					strSensor.Format("#%d RH%%, ", arrModPorts[portIndex].SensorID[i]);
+					strHeader = strHeader + strSensor;
+				}
+				else if (UseTempCelsius)
+				{
+					// strSensor.Format("#%d RH%%, #%d °C,", arrModPorts[portIndex].SensorID[i], arrModPorts[0].SensorID[i]); // $$$$
+					strSensor.Format("#%d RH%%, #%d °C,", arrModPorts[portIndex].SensorID[i], arrModPorts[portIndex].SensorID[i]);  
+					strHeader = strHeader + strSensor;
+				}
+				else
+				{
+					// strSensor.Format("#%d RH%%, #%d °F,", arrModPorts[portIndex].SensorID[i], arrModPorts[0].SensorID[i]);
+					strSensor.Format("#%d RH%%, #%d °F,", arrModPorts[portIndex].SensorID[i], arrModPorts[portIndex].SensorID[i]);
+					strHeader = strHeader + strSensor;
+				}
+			}
+		}
+		m_LogFile.open(m_LogFileName, std::ofstream::in | std::ofstream::out | std::ofstream::app);
+		m_LogFile << strHeader << "\n";
+		m_LogFile.close();
+	}
+	return true;
+}
+
+
+void CSerialCtrlDemoDlg::OnBnClickedButtonRun()
+{
+	if (m_totalSensorsFound == 0)  // $$$$
+	{
+		DisableRunAndHaltButtons();
+		DisplayInstructions("No sensors found! Run Setup to scan for sensors\r\n", true);
+	}
+	else
+	{
+		ResetFlag = true;
+		GetCalTableFlag = false;
+		RunDataLogFlag = true;
+		RunAutoSetup = false;
+
+		PrintFileHeader();
+		StartTimer(TIMER_INTERVAL);
+		HideSetupButtons();
+
+		m_btnHalt.EnableWindow(true);
+		m_btnRun.EnableWindow(false);
+
+		DisplayInstructions("Data logging in progress.\r\nTo pause logging, click HALT.", true);
+
+		CString strLogFile;
+		strLogFile.Format("Datalog file: %s", m_LogFileName);
+		m_EditStatus.SetWindowTextA(strLogFile);
+
+		m_CheckBoxNoTemperature.EnableWindow(false);
+		m_CheckBoxCelsius.EnableWindow(false);
+		m_CheckBoxFahrenheit.EnableWindow(false);
+
+		SetLoggingInterval();
+		m_EditLogIntervalSeconds.EnableWindow(false);
+		m_EditLogIntervalMinutes.EnableWindow(false);
+		m_EditLogIntervalHours.EnableWindow(false);
+	}
+}
+
+
+int CSerialCtrlDemoDlg::SetupComPorts(int stepNumber)
+{
+	CString strText, strErrors, strSensors;
+	static CString NonModbusPortNames[MAX_COM_PORTS], PortNames[MAX_COM_PORTS], ModbusPortNames[MAX_COM_PORTS];
+	static int totalSerialPorts = 0, TotalNonModbusSerialPorts, portIndex = 0, j = 0, ModbusPortIndex = 0, NumberOfModbusPortsOpened = 0;
+	static BYTE SlaveID = 0;
+	
+	UINT16 ReadData[1];
+	static int arrSensorIndex[MAX_NUMBER_OF_MODBUS_PORTS];
+
+	if (RunDataLogFlag) return START;
+
+	switch (stepNumber)
+	{
+	case 0:
+		DisplayInstructions("This routine will guide you through the setup procedure\r\n\
+for the Roscid Modbus RS485 Sensor system.\r\n\
+\r\n\
+Before using this software, the driver for the USB converters\r\n\
+must be installed. The driver installer is \"CDM21228_Setup.exe,\"\r\n\
+which is included in the Roscid Modbus Installer folder.\r\n\
+If this driver has not yet been installed,\r\n\
+please exit this program and run the installer.\r\n\
+\r\n\
+Otherwise, click NEXT to continue.", true);
+		return DONE;
+		break;
+
+	case 1:
+		DisplayInstructions("The software will now perform a system check in order\r\n\
+to identify any serial ports that are NOT used for sensors.\r\n\
+\r\n\
+If any Roscid Modbus USB converters are already connected\r\n\
+to USB ports on this computer, PLEASE UNPPLUG THEM NOW.\r\n\
+Then click NEXT to continue.", true);
+		return DONE;
+		break;
+
+	case 2:		
+		for (int portIndex = 0; portIndex < MAX_NUMBER_OF_MODBUS_PORTS; portIndex++) arrSensorIndex[portIndex] = 0;
+		TotalNonModbusSerialPorts = FindComPorts(NonModbusPortNames);
+		if (TotalNonModbusSerialPorts == 0) DisplayInstructions("No serial ports detected.", true);
+		else
+		{
+			strText.Format("This computer has %d serial port(s) in use.\r\nThese will not be used for Roscid sensors\r\n", TotalNonModbusSerialPorts);
+			DisplayInstructions(strText, true);
+		}
+		DisplayInstructions("\r\nNow plug in the Roscid USB converters.\r\nThen click NEXT.", false);
+		ModbusPortIndex = 0;
+		return DONE;
+		break;
+
+	case 3:
+		totalSerialPorts = FindComPorts(PortNames);
+		m_TotalModbusPorts = totalSerialPorts - TotalNonModbusSerialPorts;
+		if (m_TotalModbusPorts == 0)
+		{
+			DisplayInstructions("No Roscid USB converters are detected.\r\nMake sure the USB connectors are plugged in\r\nthen click NEXT to try again", true);
+			return(SYSTEM_ERROR);
+		}
+		else
+		{
+			for (ModbusPortIndex = 0; ModbusPortIndex < MAX_NUMBER_OF_MODBUS_PORTS; ModbusPortIndex++) arrModPorts[ModbusPortIndex].ComPortName = "";
+			ModbusPortIndex = 0;
+			portIndex = 0;
+			do {
+				strModbusName = PortNames[portIndex];
+				for (j = 0; j < TotalNonModbusSerialPorts; j++)
+				{
+					strNonModbusName = NonModbusPortNames[j];
+					if (strModbusName == strNonModbusName) break;
+				}
+				if (strModbusName != strNonModbusName)
+				{
+					if (ModbusPortIndex < MAX_NUMBER_OF_MODBUS_PORTS)
+						arrModPorts[ModbusPortIndex++].ComPortName = strModbusName;
+					else
+					{
+						DisplayInstructions("ERROR: Exceeded maximum number of Modbus ports", true);
+						return(SYSTEM_ERROR);
+					}
+				}
+				portIndex++;
+			} while (portIndex < totalSerialPorts && ModbusPortIndex < m_TotalModbusPorts);
+			m_EditCom1.SetWindowTextA(arrModPorts[0].ComPortName);
+			m_EditCom2.SetWindowTextA(arrModPorts[1].ComPortName);
+			if (m_TotalModbusPorts == 1) strText.Format("One Roscid Modbus USB converter has been detected.\r\nClick NEXT to activate it.", m_TotalModbusPorts);
+			else strText.Format("%d Roscid Modbus USB converters have been detected.\r\nClick NEXT to activate them.", m_TotalModbusPorts);
+			DisplayInstructions(strText, true);
+			SlaveID = 0;			
+			return DONE;
+		}
+		break;
+
+	case 4:
+		NumberOfModbusPortsOpened = OpenModbusSerialPorts();
+		if (NumberOfModbusPortsOpened > 0)
+		{
+			if (NumberOfModbusPortsOpened == 1) strText = "Success! The converter is working.\r\nNow make sure the sensor AC power adapter is plugged in.\r\nThen click NEXT to run sensor test.";
+			else strText = "Success! The converters are working.\r\nNow make sure the sensor AC power adapters are plugged in.\r\nThen click NEXT to run sensor test.";
+			DisplayInstructions(strText, true);
+			return DONE;
+		}
+		else
+		{
+			DisplayInstructions("System error: could not open serial ports.\r\nUnplug USB connectors, then plug in again and retry.", true);
+			return SYSTEM_ERROR;
+		}
+		break;
+
+	case 5: 
+		if (SlaveID == 0)
+		{
+			m_totalSensorsFound = 0;
+			SlaveID++;
+		}
+		// Try to communicate with all sensors on each com port. When a sensor responds, record sensor ID for that com port:
+		DisplayInstructions("Please wait while the RS485 bus is scanned for Roscid sensors.\r\nThis may take several of minutes,\r\nbut it only needs to be done once!", true);
+		// Try to contact sensor on first com port. If it is found, add sensor ID to list for that port.
+		for (portIndex = 0; portIndex < m_TotalModbusPorts; portIndex++)
+		{
+			if (SENSOR_RESPONSE_OK == arrModPorts[portIndex].pMod->ReadModbusInputRegister(SlaveID, VERSION_NUMBER_ADDRESS, 1, ReadData, &strErrors))
+			{
+				m_totalSensorsFound++;
+				int SensorIndex = arrSensorIndex[portIndex];
+				arrModPorts[portIndex].SensorID[SensorIndex++] = SlaveID;
+				arrSensorIndex[portIndex] = SensorIndex;
+				strText.Format("Sensor #%d: %s", SlaveID, arrModPorts[portIndex].ComPortName);
+				break;
+			}
+		}
+		if (portIndex == m_TotalModbusPorts) strText.Format("Sensor #%d: Not found.", SlaveID);
+		DisplayLog(strText);
+		// Increment sensor for communication test on next loop:
+		SlaveID++;
+		// When all sensors have been checked, record assignments in data structure for each com port:
+		if (SlaveID > HIGHEST_SLAVE_ID)
+		{
+			for (portIndex = 0; portIndex < m_TotalModbusPorts; portIndex++)
+				arrModPorts[portIndex].NumberOfSensors = arrSensorIndex[portIndex];
+			RunAutoSetup = true;
+			return DONE;
+		}
+		else
+		{
+			RunAutoSetup = true;
+			return IN_PROGRESS;
+		}
+		break;
+
+	case 6:	// Store configuration file
+		for (portIndex = 0; portIndex < m_TotalModbusPorts; portIndex++)
+		{			
+			if (0 == arrModPorts[portIndex].NumberOfSensors)
+				strSensors = "No sensors found";
+			else
+			{
+				strSensors = "";
+				for (j = 0; j < arrModPorts[portIndex].NumberOfSensors; j++)  // $$$$
+				{
+					strText.Format("%d,", arrModPorts[portIndex].SensorID[j]);
+					strSensors = strSensors + strText;
+				}
+			}
+			if (portIndex == 0)	m_EditPort1.SetWindowTextA(strSensors);
+			else if (portIndex == 1) m_EditPort2.SetWindowTextA(strSensors);
+		}
+		StoreConfig(ConfigFilename, arrModPorts);
+		DisplayInstructions("Sensor scan complete!\r\n", true);
+		DisplayDataLogMessage();
+		RunAutoSetup = false;
+		if (m_totalSensorsFound > 0) EnableRunAndHaltButtons();
+		else
+		{
+			DisableRunAndHaltButtons();
+			DisplayInstructions("No sensors found! Cannot run logger.\r\n", true);
+		}
+		HideSetupButtons();
+		ClearLog();
+		return DONE;
+		break;
+
+	default:
+		break;
+	}
+	return DONE;
+}
