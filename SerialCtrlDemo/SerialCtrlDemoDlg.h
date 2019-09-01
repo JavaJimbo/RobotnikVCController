@@ -16,7 +16,7 @@
 #include <direct.h>
 
 #define MAXLINE 1024
-#define MAX_SERVOS 100
+#define MAX_SERVOS 64
 #define MAX_POTS MAX_SERVOS
 #define MAX_PACKET_SIZE MAX_SERVOS * 4
 #define MAX_DATA_BYTES (MAX_SERVOS * 2)
@@ -30,13 +30,6 @@ enum {
 	RECORD,
 	PLAY,
 	REHEARSE
-};
-
-enum {
-	PLAYBACK_STANDBY = 0,
-	PLAYBACK_ENABLED,
-	PLAYBACK_RUN,
-	PLAYBACK_EOF
 };
 
 enum {
@@ -79,15 +72,15 @@ protected:
 public:
 	CEdit m_EditTimer, m_EditReceive;
 	SystemData	m_SD;
-	SerialCtrl m_TxPort; // , m_RxPort;
-	int m_playbackState;
+	SerialCtrl m_TxPort; // , m_RxPort;	
 
 	bool TestHandler();
 	bool StopTimer(UINT TimerVal);
 	UINT StartTimer(UINT TimerDuration);
 	void OnTimer(UINT_PTR TimerVal);
 
-	int GetServoPosition(int &frameNumber, byte &command, byte &subcommand, byte &numServos, int *ptrServoPosition, int &lineCount, int &InFileErrors);
+	bool DisplayServoPosition(int *ptrPotData, int numberofServos);
+	bool GetServoPosition(int &frameNumber, byte &command, byte &subcommand, byte &numServos, int *ptrServoPosition);
 	int GetPotData(CString strInData, int *ptrInData, int numPots);
 	int SetServoPosition(int *arrServoPosition, int *arrPotData, int *arrPotAssignments);
 	int StoreServoPosition(int &frameNumber, byte &command, byte &subcommand, byte &numServos, int *ptrServoPosition);

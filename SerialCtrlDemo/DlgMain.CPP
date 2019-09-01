@@ -4,8 +4,9 @@
 *	8-19-19 - Use one COM port at 921600 baud for send/receive. Works great with USB Robotnik and four pots, sending 63 bytes x 32 per second using COM 3.
 *	8-23-19: Send/receiving 32 frames/second with Brain Board running USB ROBOTNIK firmware.
 *	8-26-19: Reading & writing to files. Pot assignments and fast output works great. Sending 100 servo positions at roughly 32 writes/second.
+*	9-01-10: Works with actual servos. Cleaned up and simplified, both PLAY and RECORD work well.
+*				Tested with USB ROBOTNIK and ROBOTNIK BRAIN BOARD running four servo motors.
 */
-// #include <windows.h>
 #include "stdafx.h"
 #include "SerialCtrlDemo.h"
 #include "SerialCtrlDemoDlg.h"
@@ -35,12 +36,8 @@ unsigned long bytesSent = 0;
 CString strMusicFile = "C:\\Temp\\MusicFile.txt";
 CString strScratchpad = "C:\\Temp\\Scratchpad.txt";
 CString strNewPotData;
-std::ofstream outTextFile;
 
 extern UINT16 crc_modbus(unsigned char *bufData, int num_bytes);
-
-//CString TxPortName, RxPortName;
-//PortName.Format("\\\\.\\%s", COMname);
 
 static int frames = 0;
 static int seconds = 0;
@@ -49,14 +46,13 @@ static int minutes = 0;
 int frameNumber = 0;
 
 int arrPotData[MAX_POTS];
-int arrPotAssignments[MAX_POTS] = {5,6,7,8,0,0,0,0};
+int arrPotAssignments[MAX_POTS] = {0,1,2,3,0,0,0,0};
 int arrServoPosition[MAX_SERVOS];
 
 byte arrOutputBytes[MAX_PACKET_SIZE];
 byte arrPacket[MAX_PACKET_SIZE]; // [MAX_SERVOS * 16];
 unsigned int packetLength;
 
-bool runFlag = false;
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
@@ -105,8 +101,7 @@ CSerialCtrlDemoDlg::CSerialCtrlDemoDlg(CWnd* pParent /*=NULL*/) : CDialog(CSeria
 
 
 CSerialCtrlDemoDlg::~CSerialCtrlDemoDlg()
-{
-	outTextFile.close();
+{	
 	inFile.close();
 	outFile.close();	
 
@@ -213,8 +208,8 @@ void CSerialCtrlDemoDlg::OnTimer(UINT_PTR TimerVal)
 	{
 		;
 	}
-	if (TestHandler())
-		StartTimer(TIMER_INTERVAL);
+	if (TestHandler()) StartTimer(TIMER_INTERVAL);
+	else StopTimer(TIMER_INTERVAL);
 }
 
 
@@ -278,7 +273,7 @@ BOOL CSerialCtrlDemoDlg::OnInitDialog()
 
 }
 
-int CSerialCtrlDemoDlg::GetServoPosition(int &frameNumber, byte &command, byte &subcommand, byte &numServos, int *ptrServoPosition, int &lineCount, int &InFileErrors)
+bool CSerialCtrlDemoDlg::GetServoPosition(int &frameNumber, byte &command, byte &subcommand, byte &numServos, int *ptrServoPosition)
 {
 	std::string strLine;
 	const char delimiters[] = " \r\n";  // Each line of ASCII read from file will be scanned for one of three delimiters: a space, carriage return , or line break	
@@ -287,33 +282,26 @@ int CSerialCtrlDemoDlg::GetServoPosition(int &frameNumber, byte &command, byte &
 	char charLine[MAXLINE];
 	int testint = 0;
 
-	InFileErrors = NO_ERRORS;
+		if (inFile.eof())
+		{
+			inFile.close();
+			return false;
+		}
 
-
-	if (m_playbackState != PLAYBACK_RUN)
-		return NO_ERRORS;
-	else
-	{
 		if (std::getline(inFile, strLine))
 		{
 			// Read next line from file and convert to CString.
 			// Then convert CString to char[] ASCII array.
 			CString CLine(strLine.c_str());
-			if (CLine.GetLength() == 0 || CLine.GetLength() > MAXLINE)
-			{
-				InFileErrors = FILE_READ_ERROR;
-				return 0;
-			}
+			if (CLine.GetLength() == 0 || CLine.GetLength() > MAXLINE) return false;
 
 			strcpy_s(charLine, MAXLINE, CLine);
 
 			// Now check ASCII array for first occurence of a delimiter, hopefully a space ' '
 			token = strtok_s(charLine, delimiters, &context);
-			if (NULL == token)
-				return 0;
+			if (NULL == token) return false;
 
-			if (NULL == strchr(token, '>'))
-				return 0;
+			if (NULL == strchr(token, '>')) return false;
 
 			int i = 0;
 			// Now step through ASCII text, extract each position string, and convert to integer:
@@ -323,17 +311,13 @@ int CSerialCtrlDemoDlg::GetServoPosition(int &frameNumber, byte &command, byte &
 				testint = ptrServoPosition[i++] = atoi(token);
 			} while (i < MAX_SERVOS);
 			numServos = i;
-			lineCount++;
 		}
 		else
 		{
 			inFile.close();
-			m_playbackState = PLAYBACK_EOF;
-			return 0;
+			return false;
 		}
-	}
-
-	return 1;
+		return true;
 }
 
 int  CSerialCtrlDemoDlg::GetPotData(CString strInData, int *ptrInData, int numPots)
@@ -473,130 +457,39 @@ BOOL CSerialCtrlDemoDlg::SendPacket(byte *ptrPacket, int packetLength, int &byte
 }
 
 
-/*
-if (mode == RECORD)
-{
-	GetServoPosition(frameNumber, command, subcommand, numServos, arrServoPosition, lineCount, InFileErrors);
-	GetPotData(strData, arrPotData, numPots);
-	SetServoPosition(arrServoPosition, arrPotData, arrPotAssignments);
-	BuildPacket(command, subcommand, numServos, arrServoPosition, arrPacket, packetLength);
-	// SendPacket(arrPacket, packetLength);
-	StoreServoPosition(frameNumber, command, subcommand, numServos, arrServoPosition);
-}
-*/
-
-/*
-bool CSerialCtrlDemoDlg::TestHandler()
-{
-	CString strTimer;
-	int i;
-	static CString strData = "";
-	CString strDisplayData = "";
-	int numBytesReceived = 0;
-	BYTE OutData[8] = "\r";
-	static char TxBuffer[256];
-	static unsigned char testByte = 'A';
-	unsigned long bytesSent;
-	static int counter = 1;
-
-	int numPots;
-	byte command, subcommand, numServos;
-	int InFileErrors = 0;
-	static int lineCount = 0;
-
-	int length = sprintf_s(TxBuffer, 256, ">#%d: ", counter++);
-
-	for (i = length; i < 70; i++)
-	{
-		if (testByte > 'Z') testByte = 'A';
-		TxBuffer[i] = testByte++;
-	}
-	TxBuffer[68] = '<';
-	TxBuffer[69] = '\r';
-	m_TxPort.WriteSerialPort(TxBuffer, 70, bytesSent);
-
-#define MAXBUFFER 256
-	BYTE InData[MAXBUFFER];
-
-
-	if (mode == RECORD)
-	{
-		GetServoPosition(frameNumber, command, subcommand, numServos, arrServoPosition, lineCount, InFileErrors);
-		GetPotData(strData, arrPotData, numPots);
-		SetServoPosition(arrServoPosition, arrPotData, arrPotAssignments);
-		BuildPacket(command, subcommand, numServos, arrServoPosition, arrPacket, packetLength);
-		SendPacket(arrPacket, packetLength, bytesSent);
-		StoreServoPosition(frameNumber, command, subcommand, numServos, arrServoPosition);
-	}
-
-
-	numBytesReceived = (m_TxPort.ReadSerialPort(InData));
-	if (numBytesReceived)
-	{
-		CString strInData(InData);
-		strData = strData + strInData;
-		if (strData.Find("\r") != -1)
-		{
-			strDisplayData = strData;
-			m_EditReceive.SetWindowTextA(strDisplayData);
-			strData = "";
-		}
-		frames++;
-		if (frames >= 32)
-		{
-			frames = 0;
-			seconds++;
-			if (seconds >= 60)
-			{
-				seconds = 0;
-				minutes++;
-			}
-		}
-		strTimer.Format("Time: %d:%d:%d", minutes, seconds, frames);
-		m_EditTimer.SetWindowTextA(strTimer);
-	}
-
-	return runFlag;
-}
-*/
-
-
-
-void CSerialCtrlDemoDlg::OnBnClickedButtonPlay()
-{
-	runFlag = true;
-	minutes = seconds = frames = 0;
-	StartTimer(TIMER_INTERVAL);
-}
-
-
-void CSerialCtrlDemoDlg::OnBnClickedButtonStop()
-{
-	runFlag = false;
-	StopTimer(TIMER_INTERVAL);
-
-	//StopTimer(TIMER_INTERVAL);
-	outTextFile.close();
-	inFile.close();
-	outFile.close();
-	mode = STANDBY;
-}
-
-
-
 
 void CSerialCtrlDemoDlg::OnBnClickedButtonRehearse()
 {
 	// TODO: Add your control notification handler code here
 }
 
-
-
-
 void CSerialCtrlDemoDlg::PresetServos(char *ptrTxBuffer, int &numBytesToSend)
 {
 	for (int i = 0; i < MAX_SERVOS; i++) arrServoPosition[i] = i;
 }
+
+void CSerialCtrlDemoDlg::OnBnClickedButtonPlay()
+{
+	if (mode == STANDBY)
+	{
+		inFile.open(strMusicFile, std::ifstream::in);
+		if (inFile.is_open())
+		{
+			mode = PLAY;
+			minutes = seconds = frames = 0;
+			StartTimer(TIMER_INTERVAL);
+		}
+		else
+		{
+			m_EditReceive.SetWindowTextA("ERROR: could not open music file");
+			mode = STANDBY;
+			inFile.close();
+			outFile.close();
+			StopTimer(TIMER_INTERVAL);
+		}
+	}
+}
+
 
 void CSerialCtrlDemoDlg::OnBnClickedButtonRecord()
 {
@@ -614,108 +507,29 @@ void CSerialCtrlDemoDlg::OnBnClickedButtonRecord()
 	if (mode == STANDBY)
 	{
 		mode = RECORD;
-		// PresetServos(PresetBuffer, numBytesToSend);
 		byte command = 33, subCommand = 77;
 		for (i = 0; i < MAX_SERVOS; i++)
 		{
 			arrServoPosition[i] = 0;
 		}
-		//GetServoPosition(frameNumber, command, subCommand, numServos, arrServoPosition, lineCount, InFileErrors);
-		//GetPotData(strData, arrPotData, numPots);
-		//SetServoPosition(arrServoPosition, arrPotData, arrPotAssignments);
+		inFile.open(strMusicFile, std::ifstream::in);
+		outFile.open(strScratchpad, std::ofstream::trunc);
+		if (!outFile.is_open())
+		{
+			m_EditReceive.SetWindowTextA("ERROR: could not open music file");
+			mode = STANDBY;
+			inFile.close();
+			outFile.close();
+		}
+
 		BuildPacket(command, subCommand, MAX_SERVOS, arrServoPosition, arrPacket, packetLength);
 		SendPacket(arrPacket, packetLength, bytesSent);
-		// BOOL result = m_TxPort.WriteSerialPort(PresetBuffer, numBytesToSend, bytesSent);
-		//outTextFile.open(TextFileName, ios::out | ios::trunc);
-		frameNumber = 0;
-		m_playbackState = PLAYBACK_ENABLED;
-		//SetServoPosition(arrServoPosition, arrPotData, arrPotAssignments);
-		runFlag = true;
+		frameNumber = 0;				
 	}
 
 }
 
-bool CSerialCtrlDemoDlg::TestHandler()
-{
-	CString strTimer;
-	int i;
-	static CString strData = "";
-	CString strDisplayData = "";
-	int numBytesReceived = 0;
-	BYTE OutData[8] = "\r";		
-	int bytesSent;
-	static int counter = 1;		
-	int InFileErrors = 0;
-	static int lineCount = 0;
-	BYTE InData[256];	
 
-
-	static int previousMode = STANDBY;
-
-	if (previousMode != mode)
-	{
-		if (previousMode == STANDBY || previousMode == REHEARSE)
-		{
-			outFile.open(strScratchpad, std::ofstream::trunc);
-			if (m_playbackState == PLAYBACK_ENABLED)
-			{
-				inFile.open(strMusicFile, std::ifstream::in);
-				if (inFile.is_open())
-					m_playbackState = PLAYBACK_RUN;
-				else
-				{
-					m_playbackState = PLAYBACK_STANDBY;
-					InFileErrors = FILE_OPEN_ERROR;
-				}
-			}
-
-		}
-		else inFile.close();
-	}
-	previousMode = mode;
-
-	numBytesReceived = (m_TxPort.ReadSerialPort(InData));
-	if (numBytesReceived)
-	{
-		CString strInData(InData);
-		strData = strData + strInData;
-		if (strData.Find("\r") != -1)
-		{
-			strDisplayData = strData;
-			m_EditReceive.SetWindowTextA(strDisplayData);			
-		}
-		frames++;
-		if (frames >= 32)
-		{
-			frames = 0;
-			seconds++;
-			if (seconds >= 60)
-			{
-				seconds = 0;
-				minutes++;
-			}
-		}
-		strTimer.Format("Time: %d:%d:%d", minutes, seconds, frames);
-		m_EditTimer.SetWindowTextA(strTimer);
-	}
-
-
-	if (mode == RECORD)
-	{
-		frameNumber = frames + (seconds * 32) + (minutes * 32 * 32);
-		byte command = 33, subCommand = 77, numServos = MAX_SERVOS;
-		GetServoPosition(frameNumber, command, subCommand, numServos, arrServoPosition, lineCount, InFileErrors);
-		GetPotData(strData, arrPotData, NUMBER_OF_POTS);
-		strData = "";
-		SetServoPosition(arrServoPosition, arrPotData, arrPotAssignments);
-		BuildPacket(command, subCommand, numServos, arrServoPosition, arrPacket, packetLength);
-		SendPacket(arrPacket, packetLength, bytesSent);
-		StoreServoPosition(frameNumber, command, subCommand, numServos, arrServoPosition);
-	}
-
-
-	return runFlag;
-}
 
 void CSerialCtrlDemoDlg::OnBnClickedButtonReset()
 {
@@ -727,4 +541,91 @@ void CSerialCtrlDemoDlg::OnBnClickedButtonReset()
 		strTimer.Format("Time: %d:%d:%d", minutes, seconds, frames);
 		m_EditTimer.SetWindowTextA(strTimer);
 	}
+}
+
+void CSerialCtrlDemoDlg::OnBnClickedButtonStop()
+{	
+	if (mode != STANDBY)
+	{
+		StopTimer(TIMER_INTERVAL);
+		inFile.close();
+		outFile.close();
+		if (mode == RECORD) CopyFile(strScratchpad, strMusicFile, false);
+		mode = STANDBY;
+	}
+}
+
+
+
+bool CSerialCtrlDemoDlg::DisplayServoPosition(int *ptrPotData, int numberofServos)
+{
+	if (numberofServos > MAX_SERVOS) return false;
+	CString strServoData, strServoPosition = ">";
+	for (int i = 0; i < numberofServos; i++)
+	{
+		strServoData.Format(" %d,", ptrPotData[i]);
+		strServoPosition = strServoPosition + strServoData;
+	}
+	m_EditReceive.SetWindowTextA(strServoPosition);
+	return true;
+}
+
+
+bool CSerialCtrlDemoDlg::TestHandler()
+{
+	CString strTimer;
+	static CString strInData = "";
+	CString strDisplayData = "";
+	int numBytesReceived = 0;
+	int bytesSent;
+	BYTE InData[256];
+
+	frames++;
+	if (frames >= 32)
+	{
+		frames = 0;
+		seconds++;
+		if (seconds >= 60)
+		{
+			seconds = 0;
+			minutes++;
+		}
+	}
+	strTimer.Format("Time: %d:%d:%d", minutes, seconds, frames);
+	m_EditTimer.SetWindowTextA(strTimer);
+
+	if (mode == RECORD)
+	{
+		numBytesReceived = (m_TxPort.ReadSerialPort(InData));
+		if (numBytesReceived) strInData.Format("%s", InData);
+		frameNumber = frames + (seconds * 32) + (minutes * 32 * 32);
+		byte command = 33, subCommand = 77, numServos = MAX_SERVOS;
+		GetServoPosition(frameNumber, command, subCommand, numServos, arrServoPosition);
+		if (numBytesReceived) GetPotData(strInData, arrPotData, NUMBER_OF_POTS);
+		SetServoPosition(arrServoPosition, arrPotData, arrPotAssignments);
+		DisplayServoPosition(arrServoPosition, 8);
+		BuildPacket(command, subCommand, numServos, arrServoPosition, arrPacket, packetLength);
+		SendPacket(arrPacket, packetLength, bytesSent);
+		StoreServoPosition(frameNumber, command, subCommand, numServos, arrServoPosition);
+	}
+
+	if (mode == PLAY)
+	{
+		frameNumber = frames + (seconds * 32) + (minutes * 32 * 32);
+		byte command = 33, subCommand = 77, numServos = MAX_SERVOS;
+		if (GetServoPosition(frameNumber, command, subCommand, numServos, arrServoPosition))
+			DisplayServoPosition(arrServoPosition, 8);
+		else mode = STANDBY;
+		BuildPacket(command, subCommand, numServos, arrServoPosition, arrPacket, packetLength);
+		SendPacket(arrPacket, packetLength, bytesSent);
+	}
+
+	if (mode == STANDBY)
+	{
+		inFile.close();
+		outFile.close();
+		m_EditReceive.SetWindowTextA("HALTED");
+		return false;
+	}
+	else return true;
 }

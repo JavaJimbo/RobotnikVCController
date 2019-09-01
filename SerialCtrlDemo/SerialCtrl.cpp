@@ -39,7 +39,7 @@ HANDLE SerialCtrl::GetPortHandle(void)
 
 
 
-BOOL SerialCtrl::OpenPort(const char * portName, UINT16 baudrate)
+BOOL SerialCtrl::OpenPort(const char * portName, int baudrate)
 {
 	CString strPortName;
 	strPortName.Format("\\\\.\\%s", portName);

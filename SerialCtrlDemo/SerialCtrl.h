@@ -26,7 +26,7 @@ public:
 	BOOL SerialCtrl::WriteSerialPort(char *ptrOutputChar, int sizeBuffer, int &bytesSent);
 
 	int  ReadSerialPort(BYTE *ptrPacket);	
-	BOOL OpenPort(const char * portName, UINT16 baudrate);
+	BOOL OpenPort(const char * portName, int baudrate);
 	int ResetFileBuffers();
 };
 
